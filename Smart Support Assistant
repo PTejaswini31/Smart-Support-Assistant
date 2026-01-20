@@ -1,0 +1,248 @@
+/****************************************************************************************
+ FULL STACK AI CUSTOMER SUPPORT PLATFORM
+ Backend: Node.js + Express + MongoDB
+ Frontend: React
+ LLM: OpenAI API
+****************************************************************************************/
+
+/* ========================= BACKEND ========================= */
+
+/* ---------- backend/.env ----------
+PORT=5000
+MONGO_URI=your_mongodb_uri
+JWT_SECRET=supersecret
+OPENAI_API_KEY=your_openai_key
+-------------------------------------------------------------- */
+
+
+/* ---------- backend/config/db.js ---------- */
+import mongoose from "mongoose";
+
+export const connectDB = async () => {
+  await mongoose.connect(process.env.MONGO_URI);
+  console.log("MongoDB Connected");
+};
+
+
+/* ---------- backend/models/User.js ---------- */
+import mongoose from "mongoose";
+
+const userSchema = new mongoose.Schema({
+  email: String,
+  password: String,
+  role: { type: String, default: "user" }
+});
+
+export default mongoose.model("User", userSchema);
+
+
+/* ---------- backend/models/Chat.js ---------- */
+import mongoose from "mongoose";
+
+const chatSchema = new mongoose.Schema({
+  userId: String,
+  messages: [{ role: String, content: String }]
+});
+
+export default mongoose.model("Chat", chatSchema);
+
+
+/* ---------- backend/models/Document.js ---------- */
+import mongoose from "mongoose";
+
+const docSchema = new mongoose.Schema({
+  filename: String,
+  content: String
+});
+
+export default mongoose.model("Document", docSchema);
+
+
+/* ---------- backend/middleware/auth.js ---------- */
+import jwt from "jsonwebtoken";
+
+export const protect = (req, res, next) => {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return res.status(401).send("Unauthorized");
+
+  try {
+    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    next();
+  } catch {
+    res.status(401).send("Invalid Token");
+  }
+};
+
+
+/* ---------- backend/services/llmService.js ---------- */
+import OpenAI from "openai";
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+export const getAIReply = async (message, history) => {
+  const res = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: "You are a helpful support assistant." },
+      ...history,
+      { role: "user", content: message }
+    ]
+  });
+  return res.choices[0].message.content;
+};
+
+
+/* ---------- backend/routes/auth.js ---------- */
+import express from "express";
+import bcrypt from "bcrypt";
+import jwt from "jsonwebtoken";
+import User from "../models/User.js";
+
+const router = express.Router();
+
+router.post("/register", async (req, res) => {
+  const hashed = await bcrypt.hash(req.body.password, 10);
+  await User.create({ ...req.body, password: hashed });
+  res.json({ message: "Registered" });
+});
+
+router.post("/login", async (req, res) => {
+  const user = await User.findOne({ email: req.body.email });
+  if (!user) return res.status(400).send("User not found");
+
+  const match = await bcrypt.compare(req.body.password, user.password);
+  if (!match) return res.status(400).send("Wrong password");
+
+  const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET);
+  res.json({ token });
+});
+
+export default router;
+
+
+/* ---------- backend/routes/chat.js ---------- */
+import express from "express";
+import Chat from "../models/Chat.js";
+import { getAIReply } from "../services/llmService.js";
+import { protect } from "../middleware/auth.js";
+
+const router = express.Router();
+
+router.post("/", protect, async (req, res) => {
+  const { message } = req.body;
+
+  let chat = await Chat.findOne({ userId: req.user.id });
+  if (!chat) chat = await Chat.create({ userId: req.user.id, messages: [] });
+
+  const reply = await getAIReply(message, chat.messages);
+
+  chat.messages.push({ role: "user", content: message });
+  chat.messages.push({ role: "assistant", content: reply });
+  await chat.save();
+
+  res.json({ reply });
+});
+
+export default router;
+
+
+/* ---------- backend/routes/upload.js ---------- */
+import express from "express";
+import multer from "multer";
+import fs from "fs";
+import Document from "../models/Document.js";
+import { protect } from "../middleware/auth.js";
+
+const upload = multer({ dest: "uploads/" });
+const router = express.Router();
+
+router.post("/", protect, upload.single("file"), async (req, res) => {
+  const content = fs.readFileSync(req.file.path, "utf-8");
+  await Document.create({ filename: req.file.originalname, content });
+  res.json({ message: "Uploaded" });
+});
+
+export default router;
+
+
+/* ---------- backend/server.js ---------- */
+import express from "express";
+import dotenv from "dotenv";
+import cors from "cors";
+import { connectDB } from "./config/db.js";
+import authRoutes from "./routes/auth.js";
+import chatRoutes from "./routes/chat.js";
+import uploadRoutes from "./routes/upload.js";
+
+dotenv.config();
+connectDB();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+app.use("/api/auth", authRoutes);
+app.use("/api/chat", chatRoutes);
+app.use("/api/upload", uploadRoutes);
+
+app.listen(5000, () => console.log("Server running on 5000"));
+
+
+
+/* ========================= FRONTEND ========================= */
+
+/* ---------- frontend/src/api.js ---------- */
+import axios from "axios";
+
+const API = axios.create({
+  baseURL: "http://localhost:5000/api"
+});
+
+API.interceptors.request.use(req => {
+  const token = localStorage.getItem("token");
+  if (token) req.headers.Authorization = `Bearer ${token}`;
+  return req;
+});
+
+export default API;
+
+
+/* ---------- frontend/src/App.js ---------- */
+import { useState } from "react";
+import API from "./api";
+
+export default function App() {
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+
+  const send = async () => {
+    const res = await API.post("/chat", { message: input });
+
+    setMessages(prev => [
+      ...prev,
+      { role: "user", content: input },
+      { role: "assistant", content: res.data.reply }
+    ]);
+
+    setInput("");
+  };
+
+  return (
+    <div style={{ padding: 40 }}>
+      <h2>AI Customer Support</h2>
+
+      <div style={{ minHeight: 300 }}>
+        {messages.map((m, i) => (
+          <p key={i}><b>{m.role}:</b> {m.content}</p>
+        ))}
+      </div>
+
+      <input
+        value={input}
+        onChange={e => setInput(e.target.value)}
+        placeholder="Ask your question..."
+      />
+      <button onClick={send}>Send</button>
+    </div>
+  );
+}
